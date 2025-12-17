@@ -1,0 +1,12 @@
+{
+  "name": "llm-management",
+  "version": "1.0.0",
+  "description": "Modern LLM control panel with chat, model, and server management.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["llm", "chat", "dashboard"],
+  "author": "",
+  "license": "MIT"
+}
