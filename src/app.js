@@ -1,349 +1,501 @@
+import { createEmptyChat, createStore, updateChatTimestamp } from './state/store.js';
+import { defaultPresets } from './state/defaults.js';
+
+const store = createStore();
 const root = document.getElementById('app');
-
-const modelInfo = {
-  name: 'Mistral 3.5 Instruct',
-  file: '/models/mistral-3.5-instruct.Q4_0.gguf',
-  context: '128k tokens',
-  size: '7.2 GB',
-  params: '12B',
-  embeddings: '3,072',
-  vocab: '131,072 tokens',
-  vocabType: 'SentencePiece',
-  parallel: '4 slots',
-  build: 'b7263-ef75a89fd',
-  template:
-    'You are Nurik AI, a reliable assistant. Keep answers concise, note assumptions, and avoid hallucinations.'
+const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const formatRelative = (ts) => {
+  const diff = Date.now() - new Date(ts).getTime();
+  const minutes = Math.round(diff / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return `${days}d ago`;
 };
 
-const serverInfo = {
-  name: 'SFO Edge GPU',
-  endpoint: 'https://edge.nurik.ai',
-  status: 'Healthy',
-  latency: '82 ms',
-  region: 'us-west',
-  uptime: '99.97 %',
-  capacity: '4x A100 (80GB)',
-  scheduler: 'Priority + Fair Share',
-  notes: 'Autoscaling enabled; optimized for low latency interactive chats.'
-};
+const getActiveChat = (state) => state.chats.find((chat) => chat.id === state.activeChatId);
 
-let state = {
-  messages: [],
-  showModelModal: false,
-  showServerModal: false,
-  showSettings: false,
-  activeSettingsTab: 'model'
-};
+store.subscribe((state) => {
+  render(state);
+});
 
-render();
+render(store.getState());
 
-function render() {
+function render(state) {
+  document.documentElement.setAttribute('data-theme', state.theme);
+  const activeChat = getActiveChat(state);
+  const filteredChats = getFilteredChats(state);
   root.innerHTML = `
-    <div class="app-shell">
-      ${renderSidebar()}
-      ${renderMain()}
+    <div class="app-shell" data-theme="${state.theme}">
+      ${renderSidebar(state, filteredChats)}
+      <div class="layout">
+        ${renderMain(state, activeChat)}
+        ${renderSettingsPanel(state, activeChat)}
+      </div>
     </div>
-    ${state.showModelModal ? renderModelModal() : ''}
-    ${state.showServerModal ? renderServerModal() : ''}
-    ${state.showSettings ? renderSettingsModal() : ''}
   `;
-  requestAnimationFrame(() => document.querySelector('.app-shell')?.classList.add('ready'));
-  bindEvents();
+  bindSidebarEvents(state, filteredChats);
+  bindMainEvents(state, activeChat);
+  bindSettingsEvents(state, activeChat);
+  requestAnimationFrame(() => {
+    document.querySelector('.app-shell')?.classList.add('ready');
+  });
 }
 
-function renderSidebar() {
+function getFilteredChats(state) {
+  const q = state.searchQuery?.toLowerCase().trim();
+  const sorted = [...state.chats].sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  if (!q) return sorted;
+  return sorted.filter((chat) => {
+    const matchTitle = chat.title.toLowerCase().includes(q);
+    const matchMessages = chat.messages.some((m) => m.content.toLowerCase().includes(q));
+    return matchTitle || matchMessages;
+  });
+}
+
+function renderSidebar(state, chats) {
   return `
-    <aside class="sidebar">
-      <div class="brand">Nurik AI</div>
-      <div class="nav-item" data-action="new-chat">📝 New chat</div>
-      <div class="nav-item" data-action="search">🔍 Search conversations</div>
-      <div class="nav-section-title">Conversations</div>
-      <div class="empty-state">No conversations yet</div>
+    <aside class="sidebar card">
+      <div class="brand">
+        <div class="logo">LLM</div>
+        <div>
+          <div style="font-weight: 800; letter-spacing: -0.02em;">Control Center</div>
+          <div style="color: var(--muted); font-size: 12px;">Operate, route, observe</div>
+        </div>
+      </div>
+      <button class="btn primary" id="new-chat">➕ New chat</button>
+      <div class="search-input">
+        <span>🔍</span>
+        <input id="chat-search" placeholder="Search chats & messages" value="${state.searchQuery || ''}" />
+      </div>
+      <div class="section-title">Active sessions</div>
+      <div class="chat-list">
+        ${
+          chats
+            .map((chat) => {
+              const server = state.servers.find((s) => s.id === chat.serverId);
+              const latency = state.serverLatencyMap?.[chat.serverId] ?? server?.latencyMs ?? 0;
+              return `
+                <div class="chat-item ${chat.id === state.activeChatId ? 'active' : ''}" data-chat-id="${chat.id}">
+                  <div class="chat-meta">
+                    <div class="title">${chat.title}</div>
+                    <div class="subtitle">${formatRelative(chat.updatedAt)} • ${
+                state.models.find((m) => m.id === chat.modelId)?.name || 'No model'
+              }</div>
+                  </div>
+                  <div class="inline-actions" data-chat-actions="${chat.id}">
+                    <span class="badge ${server?.status === 'healthy' ? 'success' : server?.status === 'degraded' ? 'warning' : ''}">
+                      ${server?.region || 'n/a'} · ${latency} ms
+                    </span>
+                    <button class="btn icon ghost" data-rename="${chat.id}">✏️</button>
+                    <button class="btn icon ghost" data-delete="${chat.id}">🗑</button>
+                  </div>
+                </div>
+              `;
+            })
+            .join('') || '<div class="pill">No chats yet</div>'
+        }
+      </div>
     </aside>
   `;
 }
 
-function renderMain() {
+function renderMain(state, chat) {
+  const model = state.models.find((m) => m.id === chat?.modelId);
+  const server = state.servers.find((s) => s.id === chat?.serverId);
+  const latency = state.serverLatencyMap?.[chat?.serverId] ?? server?.latencyMs ?? '--';
+  const tokenEstimate = chat
+    ? Math.round(
+        chat.messages.reduce((sum, msg) => sum + Math.max(4, msg.content.split(/\s+/).length * 1.3), 0)
+      )
+    : 0;
+
   return `
-    <main class="main">
-      <div class="topbar">
-        <span></span>
-        <button class="settings-trigger" data-action="open-settings">⚙️</button>
-      </div>
-      <div class="title-block">
-        <h1>Nurik AI</h1>
-        <p>Type a message to get started</p>
-      </div>
-      <div class="info-header">
-        <div class="info-chip" data-action="open-model">
-          <div>
-            <div class="label">Model</div>
-            <div class="value">${modelInfo.name}</div>
-          </div>
+    <section class="main card">
+      <div class="toolbar">
+        <div>
+          <div class="pill">Active chat</div>
+          <h2 style="margin: 6px 0 0;">${chat?.title || 'No chat selected'}</h2>
+          <div style="color: var(--muted); font-size: 13px;">${chat?.systemPrompt || ''}</div>
         </div>
-        <div class="info-chip" data-action="open-server">
-          <div>
-            <div class="label">Server</div>
-            <div class="value">${serverInfo.name}</div>
-          </div>
+        <div class="controls">
+          <select class="select" id="model-select" ${!chat ? 'disabled' : ''}>
+            ${state.models
+              .map((m) => `<option value="${m.id}" ${chat?.modelId === m.id ? 'selected' : ''}>${m.name}</option>`)
+              .join('')}
+          </select>
+          <select class="select" id="server-select" ${!chat ? 'disabled' : ''}>
+            ${state.servers
+              .map(
+                (s) =>
+                  `<option value="${s.id}" ${chat?.serverId === s.id ? 'selected' : ''}>${s.name} (${s.region})</option>`
+              )
+              .join('')}
+          </select>
+          <button class="btn ghost" id="toggle-settings">${state.settingsOpen ? 'Close panel' : 'Settings'}</button>
+          <button class="btn ghost" id="theme-toggle">${state.theme === 'dark' ? '🌙' : '☀️'}</button>
         </div>
       </div>
-      <section class="messages">
-        ${state.messages
-          .map(
-            (msg) => `
-            <div class="message">
-              <div class="role">${msg.role}</div>
-              <div class="content">${escapeHtml(msg.content)}</div>
+
+      <div class="stat-row">
+        <div class="stat">
+          <div class="label">Model</div>
+          <div class="value">${model?.name || 'Unassigned'}</div>
+          <div class="kpi">Size: ${model?.size || '—'} · Quant: ${model?.quantization || '—'}</div>
+          <div class="kpi">Context: ${model?.contextWindow || '—'} · Throughput: ${model?.throughput || '—'}</div>
+        </div>
+        <div class="stat">
+          <div class="label">Server</div>
+          <div class="value">${server?.name || 'None'}</div>
+          <div class="kpi">Region: ${server?.region || '—'} · Latency: ${latency} ms</div>
+          <div class="kpi">Status: ${server?.status || 'unknown'}</div>
+        </div>
+        <div class="stat">
+          <div class="label">Chat health</div>
+          <div class="value">${tokenEstimate} tokens est.</div>
+          <div class="kpi">Messages: ${chat?.messages.length || 0} · Stream: ${chat?.config?.stream ? 'on' : 'off'}</div>
+        </div>
+      </div>
+
+      <div class="chat-panel">
+        <div class="message-list" id="message-list">
+          ${renderMessages(chat)}
+        </div>
+        <div class="composer">
+          <div class="inline-actions">
+            <span class="badge">Ctrl/Cmd + Enter to send</span>
+            <span class="badge">System prompt & per-chat overrides below</span>
+          </div>
+          <textarea class="textarea" id="message-input" placeholder="Ask or instruct your assistant" ${!chat ? 'disabled' : ''}></textarea>
+          <div class="flex-between">
+            <div class="inline-actions">
+              <label class="pill">Temperature <strong>${chat?.config?.temperature ?? state.globalConfig.temperature}</strong></label>
+              <label class="pill">Top-p <strong>${chat?.config?.topP ?? state.globalConfig.topP}</strong></label>
+              <label class="pill">Max tokens <strong>${chat?.config?.maxTokens ?? state.globalConfig.maxTokens}</strong></label>
             </div>
-          `
-          )
-          .join('')}
-      </section>
-      <div class="chat-card">
-        <div class="chat-input">
-          <textarea class="input-box" id="chat-input" placeholder="Ask anything...">${''}</textarea>
-          <button class="send-btn" data-action="send">↑</button>
-        </div>
-        <div class="helper">Press Enter to send, Shift + Enter for new line</div>
-      </div>
-    </main>
-  `;
-}
-
-function renderModelModal() {
-  return `
-    <div class="modal-overlay" data-action="close-model">
-      <div class="modal" data-stop>
-        <div class="modal-header">
-          <div class="modal-title">Model Information</div>
-          <button class="close-btn" data-action="close-model">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="info-grid">
-            ${infoRow('Model', modelInfo.name)}
-            ${infoRow('File Path', modelInfo.file)}
-            ${infoRow('Context Size', modelInfo.context)}
-            ${infoRow('Model Size', modelInfo.size)}
-            ${infoRow('Parameters', modelInfo.params)}
-            ${infoRow('Embedding Size', modelInfo.embeddings)}
-            ${infoRow('Vocabulary Size', modelInfo.vocab)}
-            ${infoRow('Vocabulary Type', modelInfo.vocabType)}
-            ${infoRow('Parallel Slots', modelInfo.parallel)}
-            ${infoRow('Build Info', modelInfo.build)}
-          </div>
-          <div class="field">
-            <label>Chat Template</label>
-            <textarea readonly>${modelInfo.template}</textarea>
+            <div class="inline-actions">
+              <button class="btn ghost" id="simulate-latency">Ping servers</button>
+              <button class="btn primary" id="send-message" ${!chat ? 'disabled' : ''}>Send</button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </section>
   `;
 }
 
-function renderServerModal() {
-  return `
-    <div class="modal-overlay" data-action="close-server">
-      <div class="modal" data-stop>
-        <div class="modal-header">
-          <div class="modal-title">Server Information</div>
-          <button class="close-btn" data-action="close-server">✕</button>
+function renderMessages(chat) {
+  if (!chat) return '<div class="pill">Select or create a chat to start.</div>';
+  if (!chat.messages.length) return '<div class="pill">No messages yet. Ask a question to begin.</div>';
+  return chat.messages
+    .map(
+      (msg) => `
+        <div class="message ${msg.role}">
+          <div class="meta">${msg.role === 'user' ? 'You' : 'Assistant'}<br>${formatTime(msg.createdAt)}</div>
+          <div class="body">${msg.content}</div>
         </div>
-        <div class="modal-body">
-          <div class="info-grid">
-            ${infoRow('Server', serverInfo.name)}
-            ${infoRow('Endpoint', serverInfo.endpoint)}
-            ${infoRow('Status', serverInfo.status)}
-            ${infoRow('Latency', serverInfo.latency)}
-            ${infoRow('Region', serverInfo.region)}
-            ${infoRow('Uptime', serverInfo.uptime)}
-            ${infoRow('Capacity', serverInfo.capacity)}
-            ${infoRow('Scheduler', serverInfo.scheduler)}
-          </div>
-          <div class="field">
-            <label>Notes</label>
-            <textarea readonly>${serverInfo.notes}</textarea>
-          </div>
-        </div>
-      </div>
-    </div>
-  `;
+      `
+    )
+    .join('');
 }
 
-function renderSettingsModal() {
-  const tab = state.activeSettingsTab;
+function renderSettingsPanel(state, chat) {
+  const config = chat?.config || state.globalConfig;
   return `
-    <div class="modal-overlay" data-action="close-settings">
-      <div class="modal" data-stop>
-        <div class="modal-header">
-          <div class="modal-title">Settings</div>
-          <button class="close-btn" data-action="close-settings">✕</button>
+    <aside class="panel card drawer" style="${state.settingsOpen ? '' : 'display:none;'}">
+      <div class="drawer-body config-panel">
+        <div class="flex-between">
+          <div>
+            <div class="pill">Configuration</div>
+            <h3 style="margin: 6px 0 0;">Per-chat overrides</h3>
+          </div>
+          <span class="badge">Presets & persistence</span>
         </div>
-        <div class="tabs">
-          ${['model', 'server', 'system']
+        <div class="form-grid">
+          <label>
+            <div class="label">System prompt</div>
+            <textarea class="textarea" id="system-prompt" rows="4">${chat?.systemPrompt || ''}</textarea>
+          </label>
+          <label>
+            <div class="label">Temperature (${config.temperature})</div>
+            <input class="input" type="range" id="temperature" min="0" max="1" step="0.05" value="${config.temperature}" />
+          </label>
+          <label>
+            <div class="label">Top-p (${config.topP})</div>
+            <input class="input" type="range" id="top-p" min="0" max="1" step="0.05" value="${config.topP}" />
+          </label>
+          <label>
+            <div class="label">Max tokens</div>
+            <input class="input" type="number" id="max-tokens" value="${config.maxTokens}" min="128" max="8192" />
+          </label>
+          <label class="inline-actions" style="align-items:center;">
+            <input type="checkbox" id="streaming" ${config.stream ? 'checked' : ''} />
+            <span>Stream responses</span>
+          </label>
+          <label>
+            <div class="label">Stop sequences</div>
+            <input class="input" type="text" id="stop-sequences" value="${config.stopSequences || ''}" placeholder="Separate with commas" />
+          </label>
+        </div>
+        <div class="divider"></div>
+        <div class="flex-between">
+          <div>
+            <h4 style="margin: 0 0 4px;">Presets</h4>
+            <div style="color: var(--muted); font-size: 13px;">Apply or capture configurations quickly.</div>
+          </div>
+          <button class="btn ghost" id="save-preset">💾 Save preset</button>
+        </div>
+        <div class="presets">
+          ${state.presets
             .map(
-              (key) => `
-              <button class="tab ${tab === key ? 'active' : ''}" data-tab="${key}">
-                ${formatTab(key)}
-              </button>
-            `
+              (preset) => `
+                <div class="preset-chip" data-preset="${preset.id}">
+                  <div style="font-weight: 700;">${preset.name}</div>
+                  <div style="color: var(--muted); font-size: 12px;">${preset.description}</div>
+                </div>
+              `
             )
             .join('')}
         </div>
-        <div class="settings-panel">
-          ${renderSettingsContent(tab)}
+        <div class="divider"></div>
+        <div class="flex-between">
+          <div>
+            <div class="pill">Global defaults</div>
+            <h4 style="margin: 6px 0 0;">Apply to new chats</h4>
+          </div>
+          <span class="badge">Does not overwrite existing chats</span>
+        </div>
+        <div class="form-grid">
+          <label>
+            <div class="label">Default temperature (${state.globalConfig.temperature})</div>
+            <input class="input" type="range" id="global-temperature" min="0" max="1" step="0.05" value="${state.globalConfig.temperature}" />
+          </label>
+          <label>
+            <div class="label">Default top-p (${state.globalConfig.topP})</div>
+            <input class="input" type="range" id="global-top-p" min="0" max="1" step="0.05" value="${state.globalConfig.topP}" />
+          </label>
+          <label>
+            <div class="label">Default max tokens</div>
+            <input class="input" type="number" id="global-max-tokens" value="${state.globalConfig.maxTokens}" min="128" max="8192" />
+          </label>
+          <label class="inline-actions" style="align-items:center;">
+            <input type="checkbox" id="global-streaming" ${state.globalConfig.stream ? 'checked' : ''} />
+            <span>Stream responses</span>
+          </label>
         </div>
       </div>
-    </div>
+    </aside>
   `;
 }
 
-function renderSettingsContent(tab) {
-  if (tab === 'model') {
-    return `
-      <div class="field">
-        <label>Default Model</label>
-        <input value="${modelInfo.name}" readonly />
-      </div>
-      <div class="field">
-        <label>Context Window</label>
-        <input value="${modelInfo.context}" readonly />
-      </div>
-      <div class="field">
-        <label>Template</label>
-        <textarea readonly>${modelInfo.template}</textarea>
-      </div>
-    `;
-  }
-  if (tab === 'server') {
-    return `
-      <div class="field">
-        <label>Active Server</label>
-        <input value="${serverInfo.name}" readonly />
-      </div>
-      <div class="field">
-        <label>Endpoint</label>
-        <input value="${serverInfo.endpoint}" readonly />
-      </div>
-      <div class="field">
-        <label>Notes</label>
-        <textarea readonly>${serverInfo.notes}</textarea>
-      </div>
-    `;
-  }
-  return `
-    <div class="field">
-      <label>System Message</label>
-      <textarea readonly>${modelInfo.template}</textarea>
-    </div>
-    <div class="field">
-      <label>Theme</label>
-      <input value="Dark" readonly />
-    </div>
-  `;
-}
-
-function infoRow(label, value) {
-  return `
-    <div class="info-label">${label}</div>
-    <div class="info-value">${escapeHtml(value)}</div>
-  `;
-}
-
-function bindEvents() {
-  document.querySelector('[data-action="new-chat"]')?.addEventListener('click', () => {
-    state.messages = [];
-    render();
+function bindSidebarEvents(state, chats) {
+  const newChatBtn = document.getElementById('new-chat');
+  newChatBtn?.addEventListener('click', () => {
+    const baseModel = state.models[0];
+    const baseServer = state.servers[0];
+    const chat = createEmptyChat({ modelId: baseModel?.id, serverId: baseServer?.id });
+    store.setState((prev) => ({
+      chats: [chat, ...prev.chats],
+      activeChatId: chat.id
+    }));
   });
 
-  document.querySelector('[data-action="open-model"]')?.addEventListener('click', () => {
-    state.showModelModal = true;
-    render();
+  const searchInput = document.getElementById('chat-search');
+  searchInput?.addEventListener('input', (e) => {
+    store.setState({ searchQuery: e.target.value });
   });
 
-  document.querySelector('[data-action="open-server"]')?.addEventListener('click', () => {
-    state.showServerModal = true;
-    render();
-  });
+  chats.forEach((chat) => {
+    const chatEl = document.querySelector(`[data-chat-id="${chat.id}"]`);
+    chatEl?.addEventListener('click', (event) => {
+      if (event.target.closest('[data-rename]') || event.target.closest('[data-delete]')) return;
+      store.setState({ activeChatId: chat.id });
+    });
 
-  document.querySelector('[data-action="open-settings"]')?.addEventListener('click', () => {
-    state.showSettings = true;
-    render();
-  });
-
-  document.querySelectorAll('[data-action="close-model"]').forEach((el) =>
-    el.addEventListener('click', (e) => {
-      if (e.target.dataset.action === 'close-model') {
-        state.showModelModal = false;
-        render();
-      }
-    })
-  );
-
-  document.querySelectorAll('[data-action="close-server"]').forEach((el) =>
-    el.addEventListener('click', (e) => {
-      if (e.target.dataset.action === 'close-server') {
-        state.showServerModal = false;
-        render();
-      }
-    })
-  );
-
-  document.querySelectorAll('[data-action="close-settings"]').forEach((el) =>
-    el.addEventListener('click', (e) => {
-      if (e.target.dataset.action === 'close-settings') {
-        state.showSettings = false;
-        render();
-      }
-    })
-  );
-
-  document.querySelectorAll('[data-tab]').forEach((el) =>
-    el.addEventListener('click', () => {
-      state.activeSettingsTab = el.dataset.tab;
-      render();
-    })
-  );
-
-  const modalBlocks = document.querySelectorAll('[data-stop]');
-  modalBlocks.forEach((el) =>
-    el.addEventListener('click', (e) => {
+    const renameBtn = chatEl?.querySelector(`[data-rename="${chat.id}"]`);
+    renameBtn?.addEventListener('click', (e) => {
       e.stopPropagation();
-    })
-  );
+      const nextTitle = prompt('Rename chat', chat.title);
+      if (!nextTitle) return;
+      store.setState((prev) => ({
+        chats: prev.chats.map((c) => (c.id === chat.id ? { ...c, title: nextTitle, updatedAt: new Date().toISOString() } : c))
+      }));
+    });
 
-  const sendBtn = document.querySelector('[data-action="send"]');
-  const input = document.getElementById('chat-input');
-  sendBtn?.addEventListener('click', () => handleSend(input));
+    const deleteBtn = chatEl?.querySelector(`[data-delete="${chat.id}"]`);
+    deleteBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (state.chats.length === 1) {
+        alert('At least one chat must remain.');
+        return;
+      }
+      store.setState((prev) => {
+        const filtered = prev.chats.filter((c) => c.id !== chat.id);
+        return {
+          chats: filtered,
+          activeChatId: prev.activeChatId === chat.id ? filtered[0]?.id : prev.activeChatId
+        };
+      });
+    });
+  });
+}
+
+function bindMainEvents(state, chat) {
+  const modelSelect = document.getElementById('model-select');
+  modelSelect?.addEventListener('change', (e) => {
+    const nextModel = e.target.value;
+    store.setState((prev) => ({
+      chats: prev.chats.map((c) => (c.id === prev.activeChatId ? updateChatTimestamp({ ...c, modelId: nextModel }) : c))
+    }));
+  });
+
+  const serverSelect = document.getElementById('server-select');
+  serverSelect?.addEventListener('change', (e) => {
+    const nextServer = e.target.value;
+    store.setState((prev) => ({
+      chats: prev.chats.map((c) => (c.id === prev.activeChatId ? updateChatTimestamp({ ...c, serverId: nextServer }) : c))
+    }));
+  });
+
+  const themeToggle = document.getElementById('theme-toggle');
+  themeToggle?.addEventListener('click', () => {
+    store.setState((prev) => ({ theme: prev.theme === 'dark' ? 'light' : 'dark' }));
+  });
+
+  const settingsToggle = document.getElementById('toggle-settings');
+  settingsToggle?.addEventListener('click', () => {
+    store.setState((prev) => ({ settingsOpen: !prev.settingsOpen }));
+  });
+
+  const sendBtn = document.getElementById('send-message');
+  const input = document.getElementById('message-input');
+  const sendHandler = () => {
+    if (!chat || !input) return;
+    const content = input.value.trim();
+    if (!content) return;
+    const now = new Date().toISOString();
+    const userMessage = { id: crypto.randomUUID(), role: 'user', content, createdAt: now };
+    const assistantMessage = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: generateAssistantReply(content, chat.config, chat.systemPrompt),
+      createdAt: new Date().toISOString()
+    };
+    store.setState((prev) => ({
+      chats: prev.chats.map((c) =>
+        c.id === chat.id
+          ? updateChatTimestamp({ ...c, messages: [...c.messages, userMessage, assistantMessage] })
+          : c
+      )
+    }));
+    input.value = '';
+    input.focus();
+  };
+  sendBtn?.addEventListener('click', sendHandler);
   input?.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend(input);
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      sendHandler();
     }
   });
+
+  const pingBtn = document.getElementById('simulate-latency');
+  pingBtn?.addEventListener('click', () => {
+    store.setState((prev) => {
+      const latencyMap = { ...prev.serverLatencyMap };
+      prev.servers.forEach((server) => {
+        latencyMap[server.id] = Math.max(40, Math.round(server.latencyMs * (0.8 + Math.random() * 0.6)));
+      });
+      return { serverLatencyMap: latencyMap };
+    });
+  });
 }
 
-function handleSend(input) {
-  if (!input) return;
-  const text = input.value.trim();
-  if (!text) return;
-  state.messages = [...state.messages, { role: 'You', content: text }];
-  input.value = '';
-  render();
+function bindSettingsEvents(state, chat) {
+  if (!state.settingsOpen) return;
+  const systemPrompt = document.getElementById('system-prompt');
+  systemPrompt?.addEventListener('input', (e) => {
+    if (!chat) return;
+    const next = e.target.value;
+    store.setState((prev) => ({
+      chats: prev.chats.map((c) => (c.id === prev.activeChatId ? { ...c, systemPrompt: next } : c))
+    }));
+  });
+
+  const tempInput = document.getElementById('temperature');
+  tempInput?.addEventListener('input', (e) => chat && updateChatConfig('temperature', Number(e.target.value)));
+  const topPInput = document.getElementById('top-p');
+  topPInput?.addEventListener('input', (e) => chat && updateChatConfig('topP', Number(e.target.value)));
+  const maxTokens = document.getElementById('max-tokens');
+  maxTokens?.addEventListener('input', (e) => chat && updateChatConfig('maxTokens', Number(e.target.value)));
+  const streaming = document.getElementById('streaming');
+  streaming?.addEventListener('change', (e) => chat && updateChatConfig('stream', e.target.checked));
+  const stopSequences = document.getElementById('stop-sequences');
+  stopSequences?.addEventListener('input', (e) => chat && updateChatConfig('stopSequences', e.target.value));
+
+  const savePreset = document.getElementById('save-preset');
+  savePreset?.addEventListener('click', () => {
+    if (!chat) return;
+    const name = prompt('Preset name');
+    if (!name) return;
+    const desc = prompt('Short description');
+    const newPreset = { id: crypto.randomUUID(), name, description: desc || 'Custom preset', config: { ...chat.config } };
+    store.setState((prev) => ({ presets: [newPreset, ...prev.presets] }));
+  });
+
+  document.querySelectorAll('[data-preset]').forEach((el) => {
+    el.addEventListener('click', () => {
+      if (!chat) return;
+      const preset = state.presets.find((p) => p.id === el.dataset.preset);
+      if (!preset) return;
+      store.setState((prev) => ({
+        chats: prev.chats.map((c) => (c.id === prev.activeChatId ? { ...c, config: { ...preset.config } } : c))
+      }));
+    });
+  });
+
+  const globalTemp = document.getElementById('global-temperature');
+  globalTemp?.addEventListener('input', (e) => updateGlobalConfig('temperature', Number(e.target.value)));
+  const globalTopP = document.getElementById('global-top-p');
+  globalTopP?.addEventListener('input', (e) => updateGlobalConfig('topP', Number(e.target.value)));
+  const globalMaxTokens = document.getElementById('global-max-tokens');
+  globalMaxTokens?.addEventListener('input', (e) => updateGlobalConfig('maxTokens', Number(e.target.value)));
+  const globalStreaming = document.getElementById('global-streaming');
+  globalStreaming?.addEventListener('change', (e) => updateGlobalConfig('stream', e.target.checked));
 }
 
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+function updateChatConfig(key, value) {
+  store.setState((prev) => ({
+    chats: prev.chats.map((c) =>
+      c.id === prev.activeChatId ? { ...c, config: { ...c.config, [key]: value } } : c
+    )
+  }));
 }
 
-function formatTab(key) {
-  if (key === 'model') return 'Model Configuration';
-  if (key === 'server') return 'Server Configuration';
-  return 'System Configuration';
+function updateGlobalConfig(key, value) {
+  store.setState((prev) => ({ globalConfig: { ...prev.globalConfig, [key]: value } }));
 }
+
+function generateAssistantReply(content, config, systemPrompt) {
+  const hints = [
+    '✅ Grounded in sources',
+    '📊 Summarized for clarity',
+    '⚡ Latency-aware routing',
+    '🧠 Model hint: ' + (config.temperature > 0.7 ? 'divergent thinking' : 'deterministic mode')
+  ];
+  return [
+    `System: ${systemPrompt?.slice(0, 80) || 'Default guardrails'}`,
+    `Noted your request: ${content.slice(0, 120)}`,
+    `Response mode: temp ${config.temperature}, top-p ${config.topP}, max ${config.maxTokens}`,
+    hints[Math.floor(Math.random() * hints.length)]
+  ].join('\n');
+}
+
+// Seed defaults if presets lost
+if (!store.getState().presets?.length) {
+  store.setState({ presets: defaultPresets });
+}
+
+// Ready animation
+requestAnimationFrame(() => root.classList.remove('loading'));
