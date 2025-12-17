@@ -496,3 +496,6 @@ function generateAssistantReply(content, config, systemPrompt) {
 if (!store.getState().presets?.length) {
   store.setState({ presets: defaultPresets });
 }
+
+// Ready animation
+requestAnimationFrame(() => root.classList.remove('loading'));
