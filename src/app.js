@@ -26,7 +26,6 @@ render(store.getState());
 function render(state) {
   document.documentElement.setAttribute('data-theme', state.theme);
   const activeChat = getActiveChat(state);
-  root.classList.add('ready');
   const filteredChats = getFilteredChats(state);
   root.innerHTML = `
     <div class="app-shell" data-theme="${state.theme}">
@@ -40,6 +39,9 @@ function render(state) {
   bindSidebarEvents(state, filteredChats);
   bindMainEvents(state, activeChat);
   bindSettingsEvents(state, activeChat);
+  requestAnimationFrame(() => {
+    document.querySelector('.app-shell')?.classList.add('ready');
+  });
 }
 
 function getFilteredChats(state) {
