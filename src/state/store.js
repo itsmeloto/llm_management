@@ -1,20 +1,18 @@
-import { defaultGlobalConfig, defaultModels, defaultPresets, defaultServers, starterChats } from './defaults.js';
+import { defaultModelInfo, defaultServerInfo, starterChats } from './defaults.js';
 
-const STORAGE_KEY = 'llm-control-center-state-v1';
+const STORAGE_KEY = 'nurik-ai-chat-state-v1';
 
 const freshState = () => ({
   theme: 'dark',
   searchQuery: '',
-  user: { id: 'solo', name: 'You' },
-  globalConfig: { ...defaultGlobalConfig },
-  models: defaultModels,
-  servers: defaultServers,
-  presets: defaultPresets,
   chats: starterChats,
   activeChatId: starterChats[0]?.id || null,
+  modelInfo: defaultModelInfo,
+  serverInfo: defaultServerInfo,
   settingsOpen: false,
-  editingSystemPrompt: false,
-  serverLatencyMap: Object.fromEntries(defaultServers.map((s) => [s.id, s.latencyMs]))
+  activeSettingsTab: 'model',
+  showModelModal: false,
+  showServerModal: false
 });
 
 function loadState() {
@@ -56,18 +54,13 @@ export function createStore() {
   return { getState, setState, subscribe };
 }
 
-export function createEmptyChat({ modelId, serverId }) {
+export function createEmptyChat() {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
-    title: 'Untitled chat',
+    title: 'New conversation',
     createdAt: now,
     updatedAt: now,
-    modelId,
-    serverId,
-    systemPrompt:
-      'You are a concise assistant. Respond with structured, helpful answers and call out assumptions explicitly.',
-    config: { ...defaultGlobalConfig },
     messages: []
   };
 }
